@@ -28,15 +28,7 @@ implementation
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-  DbgTag := '[DSA] ';
-  DragFiles := nil;
-  ListView1OriginalProc := ListView1.WindowProc;
-  ListView1.WindowProc := ListView1WindowProc;
   ListViewEdit := TListViewEdit.Create(ListView1);
-  DragAcceptFiles(ListView1.Handle, True);
-  Statu_Count   := StatusBar1.Panels[0];
-  Statu_Invalid := StatusBar1.Panels[1];
-  MediaList := TMediaList.Create;
 end;
 
 end.
