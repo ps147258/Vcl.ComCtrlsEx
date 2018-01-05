@@ -77,6 +77,9 @@ type
     Column, Row: Integer;
   end;
 
+  TLVEActiveEvent =
+    procedure(Sender: TObject; const FieldId: TFieldIndex; var AllowEdit: Boolean) of object;
+
   // 編輯框需要 ListView 屬性 ViewStyle = vsReport 與 ReadOnly = True 才會啟動。
   // 而當 ListView.RowSelect 為 True 時可編輯子項目，反之只能編輯 Caption。
   // The edit mode requires the ListView property ViewStyle = vsReport and ReadOnly = True to be used.
@@ -99,10 +102,12 @@ type
     FHeaderHeight: Integer;
     FEdit: TEdit;
     FOriginalWinProc: TWinProc;
+    FOnActive: TLVEActiveEvent;
     FForceKey: Word;
     FMoveStatus: TMoveStatus;
     procedure HookWindowProc(var Message: TMessage);
     procedure EditWindowProc(var Message: TMessage);
+    procedure OnEditActiveEvent(const FieldId: TFieldIndex; var AllowEdit: Boolean); inline;
     procedure InitialStatus; inline;
     procedure HeaderChanged;
     procedure SyncTextToListView;
@@ -110,6 +115,7 @@ type
     procedure SetListView(Control: TListView);
     procedure SetSyncMode(Mode: TSyncTextMode);
     procedure ScrollListToVisibleArea(Item: TListItem);
+    function ActivateEdit: Boolean; inline;
     function MoveEdit(Direc: TMoveDirec; Force: Boolean = False): Boolean;
     function GetColumnLeft(Index: Integer): Integer; inline;
     function GetHeaderHeight: Integer; inline;
@@ -146,8 +152,13 @@ type
     property SyncMode: TSyncTextMode read FSyncMode write SetSyncMode default STM_Exit;
 
     // 可略過編輯框字元游標檢查直接移動編輯框的附加按鍵，預設 [Alt]
-    // Can move directly the edit box when the arrow key are pressed with this key.
+    // Can move directly the edit box when the arrow key are pressed with this key. (Default [Alt])
     property ForceKey: Word read FForceKey write FForceKey default VK_MENU;
+
+    // 顯示編輯框的前置事件，會傳入 FieldId，可以透過 AllowEdit 來控制是否可編輯。
+    // Displays the predecessor event of the edit box,FieldID is the index of the field
+    // currently being edit. can use the change AllowEdit value to control continuing editing.
+    property OnActive: TLVEActiveEvent read FOnActive;
 
     // 取得編輯框元件，編輯框會自動建立與釋放。
     // Get edit box component.
@@ -188,6 +199,7 @@ begin
   FIsOwner := False;
   FEdit := nil;
   FListView := nil;
+  FOnActive := nil;
   FillChar(FOriginalWinProc, SizeOf(FOriginalWinProc), 0);
 
   // Set setting default.
@@ -252,6 +264,20 @@ begin
   FHeaderHeight := GetHeaderHeight;
 end;
 
+function TListViewEdit.ActivateEdit: Boolean;
+begin
+  Result := FEnable and
+            FListView.ReadOnly and
+            (FListView.ViewStyle = vsReport) and
+            (FListView.SelCount = 1);
+end;
+
+procedure TListViewEdit.OnEditActiveEvent(const FieldId: TFieldIndex; var AllowEdit: Boolean);
+begin
+  if Assigned(FOnActive) then
+    FOnActive(FListView, FieldIndex, AllowEdit);
+end;
+
 function TListViewEdit.GetColumnLeft(Index: Integer): Integer;
 begin
   Result := 0;
@@ -288,7 +314,7 @@ function TListViewEdit.ActivityEditByPos: Boolean;
 var
   CursorPos: TPoint;
 begin
-  if FEnable and (FListView.ViewStyle = vsReport) and FListView.ReadOnly then
+  if ActivateEdit then
   begin
     if GetCursorPos(CursorPos) then
     begin
@@ -330,6 +356,8 @@ begin
   if not Assigned(Item) then
     Exit(False);
   Result := InVisibleArea(Item);
+  if Result then
+    OnEditActiveEvent(FSelect, Result);
   if Result then
   begin
     I := FSelect.Column;
@@ -373,7 +401,7 @@ begin
   FOriginalWinProc.ListView(Message); // Call backup of WindowProc.
   case Message.Msg of
     WM_HSCROLL, WM_VSCROLL, WM_MOUSEWHEEL:
-      if FEnable and (FListView.ViewStyle = vsReport) and FListView.ReadOnly then
+      if ActivateEdit then
           FollowScroll;
     WM_LBUTTONDOWN:
       if Message.WParam = MK_LBUTTON then
@@ -693,7 +721,6 @@ begin
   Result := Assigned(Item);
   if Result then
   begin
-    ScrollListToVisibleArea(Item);
     I := 0;
     Inc(X, GetScrollPos(FListView.Handle, SB_HORZ));
     J := FListView.Column[I].Width;
@@ -704,22 +731,29 @@ begin
     end;
     FSelect.Column := I;
     FSelect.Row := Item.Index;
-    FEdit.Alignment := FListView.Column[I].Alignment;
-    J := FListView.Column[I].ID;
-    if J = 0 then
-      FEdit.Text := Item.Caption
-    else
-      if J <= Item.SubItems.Count then
-        FEdit.Text := Item.SubItems.Strings[J - 1]
-      else
-        FEdit.Text := '';
-    FSelectFocused := True;
-    if FollowScroll(Item) then
+
+    OnEditActiveEvent(FSelect, Result);
+    if Result then
     begin
-      if not FEdit.Visible then
-        FEdit.Show;
-      if not FEdit.Focused then
-        FEdit.SetFocus;
+      ScrollListToVisibleArea(Item);
+
+      FEdit.Alignment := FListView.Column[I].Alignment;
+      J := FListView.Column[I].ID;
+      if J = 0 then
+        FEdit.Text := Item.Caption
+      else
+        if J <= Item.SubItems.Count then
+          FEdit.Text := Item.SubItems.Strings[J - 1]
+        else
+          FEdit.Text := '';
+      FSelectFocused := True;
+      if FollowScroll(Item) then
+      begin
+        if not FEdit.Visible then
+          FEdit.Show;
+        if not FEdit.Focused then
+          FEdit.SetFocus;
+      end;
     end;
   end;
 end;
@@ -734,37 +768,45 @@ var
   Item: TListItem;
   I: Integer;
 begin
-  if FEnable and (FListView.ViewStyle = vsReport) and FListView.ReadOnly then
+  if ActivateEdit then
   begin
-    if (FieldIndex.Row >= 0) and (FieldIndex.Row < FListView.Items.Count) then
+    Result := (FieldIndex.Row >= 0) and (FieldIndex.Row < FListView.Items.Count);
+    if Result then
     begin
       FEdit.Alignment := FListView.Column[FieldIndex.Column].Alignment;
       Item := FListView.Items.Item[FieldIndex.Row];
-      I := FListView.Column[FieldIndex.Column].ID;
-      if I = 0 then
-        FEdit.Text := Item.Caption
-      else
-        if I <= Item.SubItems.Count then
-          FEdit.Text := Item.SubItems.Strings[I - 1]
-        else
-          FEdit.Clear;
-      ScrollListToVisibleArea(Item);
-
-      Move(FieldIndex, FSelect, SizeOf(TFieldIndex));
-
-      FSelectFocused := True;
-      if FollowScroll(Item) then
+      OnEditActiveEvent(FieldIndex, Result);
+      if Result then
       begin
-        if not FEdit.Visible then
-          FEdit.Show;
-        if not FEdit.Focused then
-          FEdit.SetFocus;
-        FEdit.SelectAll;
+        ScrollListToVisibleArea(Item);
+
+        I := FListView.Column[FieldIndex.Column].ID;
+        if I = 0 then
+          FEdit.Text := Item.Caption
+        else
+          if I <= Item.SubItems.Count then
+            FEdit.Text := Item.SubItems.Strings[I - 1]
+          else
+            FEdit.Clear;
+
+        Move(FieldIndex, FSelect, SizeOf(TFieldIndex));
+
+        FSelectFocused := True;
+        if FollowScroll(Item) then
+        begin
+          if not FEdit.Visible then
+            FEdit.Show;
+          if not FEdit.Focused then
+            FEdit.SetFocus;
+          FEdit.SelectAll;
+        end;
       end;
-      Exit(True);
     end;
+  end
+  else
+  begin
+    Result := False;
   end;
-  Result := False;
 end;
 
 function TListViewEdit.ShowEditByIndex(Column, Row: Integer): Boolean;
